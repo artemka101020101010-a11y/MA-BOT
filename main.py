@@ -1,27 +1,33 @@
 import os
 import json
-import copy
+import asyncio
 
 import disnake
 from disnake.ext import commands, tasks
 
+# ==========================================
+# ИНИЦИАЛИЗАЦИЯ БОТА
+# ==========================================
 intents = disnake.Intents.default()
 intents.message_content = True
-intents.members = True  # Обязательно для on_member_join / on_member_remove (счётчик участников)
+# Intent "members" обязателен для on_member_join / on_member_remove
+# и для корректного значения guild.member_count.
+# Не забудьте включить "SERVER MEMBERS INTENT" в Discord Developer Portal!
+intents.members = True
 
 bot = commands.Bot(command_prefix="!", intents=intents)
 
 # ==========================================
 # ID И НАСТРОЙКИ (Установлены твои ID)
 # ==========================================
-CATEGORY_TICKETS_ID = 1543635533375475833  # Категория, где будут создаваться тикеты
-STAFF_LOG_CHANNEL_ID = 1543652454229352448  # Канал для заявок на стафф
-STAFF_ROLE_ID = 1543621903539769344  # Роль персонала для доступа к тикетам
+CATEGORY_TICKETS_ID = 1543635533375475833      # Категория, где будут создаваться тикеты
+STAFF_LOG_CHANNEL_ID = 1543652454229352448     # Канал для заявок на стафф
+STAFF_ROLE_ID = 1543621903539769344            # Роль персонала для доступа к тикетам
 
-# 🔊 Голосовой канал-счётчик участников сервера.
-# Укажи сюда ID голосового канала, название которого бот будет
-# автоматически обновлять вида "👥 Участников: 125".
-COUNTER_CHANNEL_ID = 1550279189582848102  # <-- ЗАМЕНИ на реальный ID голосового канала
+# ID голосового канала-счётчика участников сервера.
+# Замените 0 на реальный ID вашего голосового канала!
+# Название канала будет автоматически обновляться вида: "👥 Участников: 125"
+COUNTER_CHANNEL_ID = 1550279189582848102
 
 # Ссылки на баннеры
 BANNER_STORE_MAIN = "https://cdn.discordapp.com/attachments/1543629832167104528/1543648642152398948/Picsart_26-08-30_18-18-35-370.png?ex=6a95a253&is=6a9450d3&hm=7bae522765c81430084201be33cc556a08f3cbf75723ddd8cc19f1137698f03a&"
@@ -32,116 +38,167 @@ BANNER_STAFF = "https://cdn.discordapp.com/attachments/1543629832167104528/15436
 BANNER_SUPPORT = "https://cdn.discordapp.com/attachments/1543629832167104528/1543648641242239056/Picsart_26-08-30_18-19-41-401.png?ex=6a95a253&is=6a9450d3&hm=ba87b21f4140ae240fce10f22365842088c056c1dcadb0e806c874543df12091&"
 
 # ==========================================
-# 0. КАТАЛОГ ТОВАРОВ (catalog.json)
+# КАТАЛОГ ТОВАРОВ (catalog.json)
 # ==========================================
-# Структура файла:
+# Структура файла catalog.json:
 # {
-#   "categories": {
-#       "<cat_id>": {
-#           "label": "Discord",                 -> название кнопки
-#           "emoji": "<:discord:...>",          -> эмодзи кнопки (можно оставить "")
-#           "banner": "https://...",            -> баннер категории
-#           "description": "Текст описания",    -> вступительный текст в Embed категории
-#           "products": [
-#               {"name": "...", "price": "...", "description": "..."},
-#               ...
-#           ]
-#       },
-#       ...
-#   }
+#     "id_категории": {
+#         "label": "Название кнопки",
+#         "emoji": "<:emoji:123456789>",
+#         "banner": "https://...",
+#         "description": "Текст-описание категории",
+#         "products": [
+#             {"name": "Товар", "price": "100₽", "description": "Описание товара"}
+#         ]
+#     },
+#     ...
 # }
-#
-# custom_id кнопки категории собирается как f"btn_store_{cat_id}", поэтому
-# для трёх изначальных категорий (ds / boost / steam) custom_id полностью
-# совпадает со старыми "btn_store_ds", "btn_store_boost", "btn_store_steam" —
-# ничего в уже существующих сообщениях не ломается.
 
 CATALOG_FILE = "catalog.json"
+_catalog_lock = asyncio.Lock()
 
+# Стартовые данные каталога — переносим текущие цены магазина,
+# чтобы после первого запуска ничего не пропало.
 DEFAULT_CATALOG = {
-    "categories": {
-        "ds": {
-            "label": "Discord",
-            "emoji": "<:discord:1543647404212093009>",
-            "banner": BANNER_STORE_DS,
-            "description": "🌐 **Товары — Discord**\nУслуги, связанные с серверами и ботами.",
-            "products": [
-                {"name": "Создание сервера", "price": "от 25⭐ / 40₽", "description": "Полная настройка сервера с нуля."},
-                {"name": "Создание сервера + настройка ботов", "price": "от 25⭐ / 40₽", "description": "Сервер и базовая настройка ботов под ваши задачи."},
-                {"name": "Создание сервера с кастомным ботом", "price": "от 50⭐ / 100₽", "description": "Сервер + уникальный бот под ваш проект."},
-                {"name": "Создание ботов под задачи + хостинг", "price": "от 50⭐ / 100₽", "description": "Разработка бота и его размещение на хостинге."},
-                {"name": "Хостинг вашего бота в дальнейшем", "price": "25⭐ / 50₽ мес.", "description": "Поддержка работы бота 24/7."},
-            ],
-        },
-        "boost": {
-            "label": "Накрутка DS",
-            "emoji": "<:people:1543647540426055712>",
-            "banner": BANNER_STORE_BOOST,
-            "description": "🚀 **Накрутка Discord**\nУчастники для вашего сервера. Заказ от 50 участников.",
-            "products": [
-                {"name": "1 Оффлайн участник", "price": "0.25₽", "description": "Оффлайн-аккаунты, стабильно держатся на сервере."},
-                {"name": "1 Онлайн участник", "price": "0.50₽", "description": "Онлайн-аккаунты, для живого вида сервера."},
-            ],
-        },
-        "steam": {
-            "label": "Steam",
-            "emoji": "<:steam:1543647341129629756>",
-            "banner": BANNER_STORE_STEAM,
-            "description": "🎮 **Пополнение Steam**\nКурс пополнения: 1 Рубль = 1.02 Рубля на баланс.",
-            "products": [
-                {"name": "Пополнение баланса Steam", "price": "Курс 1 → 1.02", "description": "Оплата в рублях, зачисление на баланс Steam."},
-            ],
-        },
+    "ds": {
+        "label": "Discord",
+        "emoji": "<:discord:1543647404212093009>",
+        "banner": BANNER_STORE_DS,
+        "description": "Услуги, связанные с серверами и ботами.",
+        "products": [
+            {
+                "name": "Создание сервера",
+                "price": "от 25⭐ / 40₽",
+                "description": "Полная настройка сервера под ключ."
+            },
+            {
+                "name": "Создание сервера + настройка ботов",
+                "price": "от 25⭐ / 40₽",
+                "description": "Сервер и базовая настройка ботов."
+            },
+            {
+                "name": "Создание сервера с кастомным ботом",
+                "price": "от 50⭐ / 100₽",
+                "description": "Сервер + уникальный бот под ваши задачи."
+            },
+            {
+                "name": "Создание ботов под задачи + хостинг",
+                "price": "от 50⭐ / 100₽",
+                "description": "Индивидуальная разработка бота с хостингом."
+            },
+            {
+                "name": "Хостинг вашего бота",
+                "price": "25⭐ / 50₽ мес.",
+                "description": "Ежемесячный хостинг для уже готового бота."
+            }
+        ]
+    },
+    "boost": {
+        "label": "Накрутка DS",
+        "emoji": "<:people:1543647540426055712>",
+        "banner": BANNER_STORE_BOOST,
+        "description": "Накрутка участников для вашего сервера (заказ от 50 участников).",
+        "products": [
+            {
+                "name": "Оффлайн участник",
+                "price": "0.25₽",
+                "description": "1 оффлайн-участник на сервер."
+            },
+            {
+                "name": "Онлайн участник",
+                "price": "0.50₽",
+                "description": "1 онлайн-участник на сервер."
+            }
+        ]
+    },
+    "steam": {
+        "label": "Steam",
+        "emoji": "<:steam:1543647341129629756>",
+        "banner": BANNER_STORE_STEAM,
+        "description": "Пополнение баланса Steam.",
+        "products": [
+            {
+                "name": "Пополнение баланса",
+                "price": "1 руб. = 1.02 руб. на баланс",
+                "description": "Курс пополнения Steam-кошелька."
+            }
+        ]
     }
 }
 
-
-def load_catalog() -> dict:
-    """Загружает catalog.json. Если файла нет — создаёт его со стандартными категориями."""
-    if not os.path.exists(CATALOG_FILE):
-        save_catalog(DEFAULT_CATALOG)
-        return copy.deepcopy(DEFAULT_CATALOG)
-    try:
-        with open(CATALOG_FILE, "r", encoding="utf-8") as f:
-            data = json.load(f)
-            if "categories" not in data:
-                data["categories"] = {}
-            return data
-    except (json.JSONDecodeError, OSError):
-        # Файл повреждён — не затираем его молча, а поднимаем дефолт в памяти
-        return copy.deepcopy(DEFAULT_CATALOG)
+# Фиксированные custom_id для "старых" категорий — чтобы кнопки
+# остались теми же самыми и все ранее отправленные сообщения продолжали работать.
+CATEGORY_CUSTOM_IDS = {
+    "ds": "btn_store_ds",
+    "boost": "btn_store_boost",
+    "steam": "btn_store_steam"
+}
 
 
-def save_catalog(data: dict) -> None:
-    """Сохраняет каталог в catalog.json."""
+def _save_catalog_sync(data: dict) -> None:
+    """Синхронно сохраняет каталог в файл (используется только внутри блокировки)."""
     with open(CATALOG_FILE, "w", encoding="utf-8") as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 
-def format_products_field(products: list) -> str:
-    """Красиво форматирует список товаров категории для Embed."""
+def _ensure_catalog_file() -> None:
+    """Создаёт catalog.json с данными по умолчанию, если файла ещё нет."""
+    if not os.path.exists(CATALOG_FILE):
+        _save_catalog_sync(DEFAULT_CATALOG)
+
+
+def load_catalog() -> dict:
+    """Загружает каталог из catalog.json. При отсутствии/повреждении файла — создаёт заново."""
+    _ensure_catalog_file()
+    try:
+        with open(CATALOG_FILE, "r", encoding="utf-8") as f:
+            return json.load(f)
+    except (json.JSONDecodeError, FileNotFoundError):
+        _save_catalog_sync(DEFAULT_CATALOG)
+        return json.loads(json.dumps(DEFAULT_CATALOG))
+
+
+async def save_catalog(data: dict) -> None:
+    """Асинхронно и безопасно сохраняет каталог (с блокировкой от гонок записи)."""
+    async with _catalog_lock:
+        _save_catalog_sync(data)
+
+
+def build_product_fields(products: list) -> list:
+    """
+    Формирует список полей Embed (name, value) со списком товаров,
+    разбивая длинный список на несколько полей, чтобы не превысить лимит
+    Discord в 1024 символа на значение поля.
+    """
     if not products:
-        return "Пока нет доступных товаров."
-    lines = []
-    for p in products:
-        name = p.get("name", "Без названия")
-        price = p.get("price", "—")
-        desc = p.get("description", "")
-        block = f"**{name}** — `{price}`"
-        if desc:
-            block += f"\n{desc}"
-        lines.append(block)
-    text = "\n\n".join(lines)
-    # Discord ограничивает значение поля Embed 1024 символами
-    if len(text) > 1024:
-        text = text[:1000] + "\n…"
-    return text
+        return [("🛍️ Товары", "Пока нет товаров в этой категории.")]
+
+    fields = []
+    chunk = ""
+    part = 1
+    for product in products:
+        entry = (
+            f"**{product.get('name', 'Без названия')}**\n"
+            f"> 💰 Цена: {product.get('price', 'уточняйте')}\n"
+            f"> 📝 {product.get('description', 'Без описания')}\n\n"
+        )
+        if len(chunk) + len(entry) > 1000:
+            title = "🛍️ Товары" if part == 1 else f"🛍️ Товары ({part})"
+            fields.append((title, chunk.strip()))
+            chunk = ""
+            part += 1
+        chunk += entry
+
+    if chunk:
+        title = "🛍️ Товары" if part == 1 else f"🛍️ Товары ({part})"
+        fields.append((title, chunk.strip()))
+
+    return fields
 
 
 # ==========================================
 # 1. МОДАЛЬНЫЕ ОКНА (MODALS)
 # ==========================================
-
 class OrderModal(disnake.ui.Modal):
     def __init__(self):
         components = [
@@ -202,7 +259,11 @@ class OrderModal(disnake.ui.Modal):
         embed.add_field(name="📝 Детали:", value=f"```\n{details}\n```", inline=False)
 
         view = CloseTicketView()
-        await ticket_channel.send(content=f"{inter.author.mention} {staff_role.mention if staff_role else ''}", embed=embed, view=view)
+        await ticket_channel.send(
+            content=f"{inter.author.mention} {staff_role.mention if staff_role else ''}",
+            embed=embed,
+            view=view
+        )
         await inter.edit_original_message(content=f"✅ Ваш заказ успешно создан: {ticket_channel.mention}")
 
 
@@ -248,7 +309,11 @@ class SupportModal(disnake.ui.Modal):
         embed.add_field(name="❓ Причина обращения:", value=f"```\n{reason}\n```", inline=False)
 
         view = CloseTicketView()
-        await ticket_channel.send(content=f"{inter.author.mention} {staff_role.mention if staff_role else ''}", embed=embed, view=view)
+        await ticket_channel.send(
+            content=f"{inter.author.mention} {staff_role.mention if staff_role else ''}",
+            embed=embed,
+            view=view
+        )
         await inter.edit_original_message(content=f"✅ Тикет поддержки создан: {ticket_channel.mention}")
 
 
@@ -322,7 +387,11 @@ class StaffRejectModal(disnake.ui.Modal):
 
         embed = inter.message.embeds[0]
         embed.color = disnake.Color.red()
-        embed.add_field(name="❌ Статус:", value=f"Отклонено администратором {inter.author.mention}\n**Причина:** {reason}", inline=False)
+        embed.add_field(
+            name="❌ Статус:",
+            value=f"Отклонено администратором {inter.author.mention}\n**Причина:** {reason}",
+            inline=False
+        )
 
         view = disnake.ui.View.from_message(inter.message)
         for child in view.children:
@@ -331,7 +400,9 @@ class StaffRejectModal(disnake.ui.Modal):
         await inter.edit_original_message(embed=embed, view=view)
 
         try:
-            await self.applicant.send(f"❌ Ваша заявка на должность **{self.role_name}** была отклонена.\n**Причина:** {reason}")
+            await self.applicant.send(
+                f"❌ Ваша заявка на должность **{self.role_name}** была отклонена.\n**Причина:** {reason}"
+            )
         except disnake.Forbidden:
             pass
 
@@ -339,178 +410,238 @@ class StaffRejectModal(disnake.ui.Modal):
 # ------------------------------------------
 # 1.1 МОДАЛЬНЫЕ ОКНА ДЛЯ УПРАВЛЕНИЯ МАГАЗИНОМ (/shop)
 # ------------------------------------------
+class CategorySettingsModal(disnake.ui.Modal):
+    """Модалка редактирования параметров категории: название, эмодзи, описание, баннер."""
 
-class CategoryEditModal(disnake.ui.Modal):
-    """Редактирование параметров категории: название кнопки, эмодзи, текст, баннер."""
-
-    def __init__(self, cat_id: str):
+    def __init__(self, cat_id: str, cat_data: dict):
         self.cat_id = cat_id
-        catalog = load_catalog()
-        cat = catalog["categories"].get(cat_id, {})
         components = [
             disnake.ui.TextInput(
-                label="Название кнопки",
-                placeholder="Например: Discord",
+                label="Название кнопки категории",
                 custom_id="cat_label",
                 style=disnake.TextInputStyle.short,
-                max_length=80,
-                value=cat.get("label", "")
+                value=cat_data.get("label", "") or "",
+                max_length=80
             ),
             disnake.ui.TextInput(
-                label="Эмодзи кнопки (можно пусто)",
-                placeholder="<:discord:1543647404212093009>",
+                label="Эмодзи (например <:name:id> или 🔥)",
                 custom_id="cat_emoji",
                 style=disnake.TextInputStyle.short,
+                value=cat_data.get("emoji", "") or "",
                 required=False,
-                max_length=100,
-                value=cat.get("emoji", "")
+                max_length=100
             ),
             disnake.ui.TextInput(
-                label="Описание / текст категории",
-                placeholder="Текст, который увидит пользователь в Embed",
+                label="Описание категории (текст в Embed)",
                 custom_id="cat_description",
                 style=disnake.TextInputStyle.paragraph,
+                value=cat_data.get("description", "") or "",
                 required=False,
-                max_length=1000,
-                value=cat.get("description", "")
+                max_length=1000
             ),
             disnake.ui.TextInput(
-                label="Ссылка на баннер",
-                placeholder="https://...",
+                label="Ссылка на баннер (URL картинки)",
                 custom_id="cat_banner",
                 style=disnake.TextInputStyle.short,
+                value=cat_data.get("banner", "") or "",
                 required=False,
-                max_length=300,
-                value=cat.get("banner", "")
-            ),
+                max_length=500
+            )
         ]
-        super().__init__(title="Изменить категорию", custom_id=f"modal_cat_edit_{cat_id}", components=components)
+        super().__init__(
+            title=f"Настройка категории: {cat_id}"[:45],
+            custom_id=f"modal_cat_settings_{cat_id}",
+            components=components
+        )
 
     async def callback(self, inter: disnake.ModalInteraction):
+        await inter.response.defer(ephemeral=True)
         catalog = load_catalog()
-        cat = catalog["categories"].setdefault(self.cat_id, {"products": []})
-        cat["label"] = inter.text_values["cat_label"].strip() or cat.get("label", self.cat_id)
-        cat["emoji"] = inter.text_values["cat_emoji"].strip()
-        cat["description"] = inter.text_values["cat_description"].strip()
-        cat["banner"] = inter.text_values["cat_banner"].strip()
-        save_catalog(catalog)
+        if self.cat_id not in catalog:
+            await inter.edit_original_message(content="❌ Категория была удалена, действие отменено.")
+            return
 
-        await inter.response.edit_message(
-            content=f"✅ Категория **{cat['label']}** обновлена.\n"
-                    f"⚠️ Чтобы новые название/эмодзи кнопки появились на витрине, "
-                    f"повторно отправьте `/setup` → «Магазин» в нужный канал.",
-            embed=build_category_manage_embed(self.cat_id, cat),
-            view=ShopCategoryManageView(self.cat_id)
+        catalog[self.cat_id]["label"] = inter.text_values["cat_label"]
+        catalog[self.cat_id]["emoji"] = inter.text_values["cat_emoji"] or None
+        catalog[self.cat_id]["description"] = inter.text_values["cat_description"]
+        catalog[self.cat_id]["banner"] = inter.text_values["cat_banner"]
+        await save_catalog(catalog)
+
+        await inter.edit_original_message(
+            content=f"✅ Категория **{catalog[self.cat_id]['label']}** обновлена.\n"
+                    f"ℹ️ Чтобы изменения появились на витрине, повторно отправьте меню магазина через `/setup`."
         )
 
 
-class ProductAddModal(disnake.ui.Modal):
-    """Добавление нового товара в категорию."""
+class AddProductModal(disnake.ui.Modal):
+    """Модалка добавления нового товара в категорию."""
 
     def __init__(self, cat_id: str):
         self.cat_id = cat_id
         components = [
             disnake.ui.TextInput(
                 label="Название товара",
-                placeholder="Например: Создание сервера",
-                custom_id="prod_name",
+                custom_id="p_name",
                 style=disnake.TextInputStyle.short,
                 max_length=100
             ),
             disnake.ui.TextInput(
                 label="Цена",
-                placeholder="Например: от 25⭐ / 40₽",
-                custom_id="prod_price",
+                custom_id="p_price",
                 style=disnake.TextInputStyle.short,
-                max_length=50
+                max_length=100
             ),
             disnake.ui.TextInput(
                 label="Описание",
-                placeholder="Краткое описание товара",
-                custom_id="prod_description",
+                custom_id="p_desc",
                 style=disnake.TextInputStyle.paragraph,
                 required=False,
                 max_length=300
-            ),
+            )
         ]
-        super().__init__(title="Добавить товар", custom_id=f"modal_prod_add_{cat_id}", components=components)
+        super().__init__(title="Добавить товар", custom_id=f"modal_add_product_{cat_id}", components=components)
 
     async def callback(self, inter: disnake.ModalInteraction):
+        await inter.response.defer(ephemeral=True)
         catalog = load_catalog()
-        cat = catalog["categories"].setdefault(self.cat_id, {"products": []})
-        cat.setdefault("products", []).append({
-            "name": inter.text_values["prod_name"].strip(),
-            "price": inter.text_values["prod_price"].strip(),
-            "description": inter.text_values["prod_description"].strip(),
-        })
-        save_catalog(catalog)
+        if self.cat_id not in catalog:
+            await inter.edit_original_message(content="❌ Категория не найдена.")
+            return
 
-        await inter.response.edit_message(
-            content=f"✅ Товар **{inter.text_values['prod_name'].strip()}** добавлен в категорию **{cat.get('label', self.cat_id)}**.",
-            embed=build_category_manage_embed(self.cat_id, cat),
-            view=ShopCategoryManageView(self.cat_id)
+        product = {
+            "name": inter.text_values["p_name"],
+            "price": inter.text_values["p_price"],
+            "description": inter.text_values["p_desc"] or "Без описания"
+        }
+        catalog[self.cat_id].setdefault("products", []).append(product)
+        await save_catalog(catalog)
+
+        await inter.edit_original_message(
+            content=f"✅ Товар **{product['name']}** добавлен в категорию **{catalog[self.cat_id].get('label', self.cat_id)}**."
         )
 
 
-class ProductEditModal(disnake.ui.Modal):
-    """Редактирование существующего товара по индексу в списке категории."""
+class EditProductModal(disnake.ui.Modal):
+    """Модалка редактирования существующего товара по его индексу в списке категории."""
 
-    def __init__(self, cat_id: str, index: int):
+    def __init__(self, cat_id: str, index: int, product: dict):
         self.cat_id = cat_id
         self.index = index
-        catalog = load_catalog()
-        product = catalog["categories"].get(cat_id, {}).get("products", [])[index]
         components = [
             disnake.ui.TextInput(
                 label="Название товара",
-                custom_id="prod_name",
+                custom_id="p_name",
                 style=disnake.TextInputStyle.short,
-                max_length=100,
-                value=product.get("name", "")
+                value=product.get("name", ""),
+                max_length=100
             ),
             disnake.ui.TextInput(
                 label="Цена",
-                custom_id="prod_price",
+                custom_id="p_price",
                 style=disnake.TextInputStyle.short,
-                max_length=50,
-                value=product.get("price", "")
+                value=product.get("price", ""),
+                max_length=100
             ),
             disnake.ui.TextInput(
                 label="Описание",
-                custom_id="prod_description",
+                custom_id="p_desc",
                 style=disnake.TextInputStyle.paragraph,
+                value=product.get("description", ""),
                 required=False,
-                max_length=300,
-                value=product.get("description", "")
-            ),
+                max_length=300
+            )
         ]
-        super().__init__(title="Редактировать товар", custom_id=f"modal_prod_edit_{cat_id}_{index}", components=components)
+        super().__init__(
+            title="Редактировать товар",
+            custom_id=f"modal_edit_product_{cat_id}_{index}",
+            components=components
+        )
 
     async def callback(self, inter: disnake.ModalInteraction):
+        await inter.response.defer(ephemeral=True)
         catalog = load_catalog()
-        cat = catalog["categories"].setdefault(self.cat_id, {"products": []})
-        products = cat.setdefault("products", [])
+        products = catalog.get(self.cat_id, {}).get("products", [])
+
         if self.index >= len(products):
-            return await inter.response.send_message("❌ Этот товар уже был удалён.", ephemeral=True)
+            await inter.edit_original_message(content="❌ Товар не найден (возможно, был удалён).")
+            return
 
         products[self.index] = {
-            "name": inter.text_values["prod_name"].strip(),
-            "price": inter.text_values["prod_price"].strip(),
-            "description": inter.text_values["prod_description"].strip(),
+            "name": inter.text_values["p_name"],
+            "price": inter.text_values["p_price"],
+            "description": inter.text_values["p_desc"] or "Без описания"
         }
-        save_catalog(catalog)
+        await save_catalog(catalog)
+        await inter.edit_original_message(content="✅ Товар успешно обновлён.")
 
-        await inter.response.edit_message(
-            content=f"✅ Товар обновлён в категории **{cat.get('label', self.cat_id)}**.",
-            embed=build_category_manage_embed(self.cat_id, cat),
-            view=ShopCategoryManageView(self.cat_id)
+
+class AddCategoryModal(disnake.ui.Modal):
+    """Модалка создания новой категории каталога."""
+
+    def __init__(self):
+        components = [
+            disnake.ui.TextInput(
+                label="Идентификатор категории (латиницей, без пробелов)",
+                placeholder="Например: minecraft",
+                custom_id="new_cat_id",
+                style=disnake.TextInputStyle.short,
+                max_length=40
+            ),
+            disnake.ui.TextInput(
+                label="Название кнопки категории",
+                custom_id="new_cat_label",
+                style=disnake.TextInputStyle.short,
+                max_length=80
+            ),
+            disnake.ui.TextInput(
+                label="Эмодзи (необязательно)",
+                custom_id="new_cat_emoji",
+                style=disnake.TextInputStyle.short,
+                required=False,
+                max_length=100
+            ),
+            disnake.ui.TextInput(
+                label="Описание категории",
+                custom_id="new_cat_description",
+                style=disnake.TextInputStyle.paragraph,
+                required=False,
+                max_length=1000
+            )
+        ]
+        super().__init__(title="Новая категория", custom_id="modal_add_category", components=components)
+
+    async def callback(self, inter: disnake.ModalInteraction):
+        await inter.response.defer(ephemeral=True)
+        catalog = load_catalog()
+
+        raw_id = inter.text_values["new_cat_id"].strip().lower()
+        cat_id = "".join(ch for ch in raw_id if ch.isalnum() or ch == "_")
+
+        if not cat_id:
+            await inter.edit_original_message(content="❌ Некорректный идентификатор категории.")
+            return
+        if cat_id in catalog:
+            await inter.edit_original_message(content="❌ Категория с таким идентификатором уже существует.")
+            return
+
+        catalog[cat_id] = {
+            "label": inter.text_values["new_cat_label"],
+            "emoji": inter.text_values["new_cat_emoji"] or None,
+            "banner": "",
+            "description": inter.text_values["new_cat_description"],
+            "products": []
+        }
+        await save_catalog(catalog)
+
+        await inter.edit_original_message(
+            content=f"✅ Категория **{catalog[cat_id]['label']}** создана.\n"
+                    f"ℹ️ Отправьте меню магазина заново через `/setup`, чтобы кнопка появилась на витрине."
         )
 
 
 # ==========================================
 # 2. ИНТЕРАКТИВНЫЕ КОМПОНЕНТЫ (VIEWS)
 # ==========================================
-
 class CloseTicketView(disnake.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -518,7 +649,7 @@ class CloseTicketView(disnake.ui.View):
     @disnake.ui.button(label="Закрыть тикет", style=disnake.ButtonStyle.danger, emoji="🔒", custom_id="close_ticket_btn")
     async def close_ticket(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         await inter.response.send_message("🔒 Канал будет удален через 5 секунд...")
-        await disnake.utils.sleep_until(disnake.utils.utcnow() + disnake.ext.tasks.datetime.timedelta(seconds=5))
+        await asyncio.sleep(5)
         await inter.channel.delete()
 
 
@@ -533,7 +664,8 @@ class StaffReviewView(disnake.ui.View):
         guild = inter.guild
         applicant = guild.get_member(self.applicant_id)
         if not applicant:
-            return await inter.response.send_message("❌ Кандидат не найден на сервере!", ephemeral=True)
+            await inter.response.send_message("❌ Кандидат не найден на сервере!", ephemeral=True)
+            return
 
         staff_role = guild.get_role(STAFF_ROLE_ID)
         if staff_role:
@@ -558,8 +690,8 @@ class StaffReviewView(disnake.ui.View):
         guild = inter.guild
         applicant = guild.get_member(self.applicant_id)
         if not applicant:
-            return await inter.response.send_message("❌ Кандидат не найден на сервере!", ephemeral=True)
-
+            await inter.response.send_message("❌ Кандидат не найден на сервере!", ephemeral=True)
+            return
         await inter.response.send_modal(StaffRejectModal(applicant=applicant, role_name=self.role_name))
 
 
@@ -567,9 +699,214 @@ class OrderActionView(disnake.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
 
-    @disnake.ui.button(label="Сделать заказ", style=disnake.ButtonStyle.success, emoji="<:shop:1543647510634045490>", custom_id="btn_make_order")
+    @disnake.ui.button(
+        label="Сделать заказ",
+        style=disnake.ButtonStyle.success,
+        emoji="<:shop:1543647510634045490>",
+        custom_id="btn_make_order"
+    )
     async def make_order(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
         await inter.response.send_modal(OrderModal())
+
+
+# ------------------------------------------
+# 2.1 ВИТРИНА МАГАЗИНА — строится динамически из catalog.json
+# ------------------------------------------
+class CategoryButton(disnake.ui.Button):
+    """Кнопка одной категории на витрине. custom_id сохраняется прежним для старых категорий."""
+
+    def __init__(self, cat_id: str, cat_data: dict):
+        custom_id = CATEGORY_CUSTOM_IDS.get(cat_id, f"btn_store_cat_{cat_id}")
+        super().__init__(
+            label=cat_data.get("label", cat_id),
+            style=disnake.ButtonStyle.secondary,
+            emoji=cat_data.get("emoji") or None,
+            custom_id=custom_id
+        )
+        self.cat_id = cat_id
+
+    async def callback(self, inter: disnake.MessageInteraction):
+        catalog = load_catalog()
+        cat_data = catalog.get(self.cat_id)
+
+        if not cat_data:
+            await inter.response.send_message("❌ Эта категория больше не существует.", ephemeral=True)
+            return
+
+        embed = disnake.Embed(
+            title=f"{cat_data.get('label', self.cat_id)}",
+            description=cat_data.get("description") or "\u200b",
+            color=0x2b2d31
+        )
+        if cat_data.get("banner"):
+            embed.set_image(url=cat_data["banner"])
+
+        for name, value in build_product_fields(cat_data.get("products", [])):
+            embed.add_field(name=name, value=value, inline=False)
+
+        await inter.response.send_message(embed=embed, view=OrderActionView(), ephemeral=True)
+
+
+class DynamicStoreView(disnake.ui.View):
+    """Витрина магазина: одна кнопка на каждую категорию из catalog.json."""
+
+    def __init__(self):
+        super().__init__(timeout=None)
+        catalog = load_catalog()
+        for cat_id, cat_data in catalog.items():
+            self.add_item(CategoryButton(cat_id, cat_data))
+
+
+# ------------------------------------------
+# 2.2 АДМИН-ПАНЕЛЬ МАГАЗИНА (/shop)
+# ------------------------------------------
+class ProductSelect(disnake.ui.StringSelect):
+    def __init__(self, cat_id: str, options: list, action: str):
+        placeholder = "Выберите товар для редактирования" if action == "edit" else "Выберите товар для удаления"
+        super().__init__(
+            placeholder=placeholder,
+            options=options,
+            custom_id=f"shop_admin_select_product_{action}_{cat_id}"
+        )
+        self.cat_id = cat_id
+        self.action = action
+
+    async def callback(self, inter: disnake.MessageInteraction):
+        index = int(self.values[0])
+        catalog = load_catalog()
+        products = catalog.get(self.cat_id, {}).get("products", [])
+
+        if index >= len(products):
+            await inter.response.send_message("❌ Товар не найден (список мог измениться).", ephemeral=True)
+            return
+
+        if self.action == "edit":
+            await inter.response.send_modal(EditProductModal(self.cat_id, index, products[index]))
+        else:
+            removed = products.pop(index)
+            await save_catalog(catalog)
+            await inter.response.edit_message(content=f"🗑️ Товар **{removed['name']}** удалён.", view=None)
+
+
+class ProductSelectView(disnake.ui.View):
+    def __init__(self, cat_id: str, products: list, action: str):
+        super().__init__(timeout=180)
+        options = [
+            disnake.SelectOption(
+                label=product.get("name", "Без названия")[:100],
+                value=str(index),
+                description=product.get("price", "")[:100] or None
+            )
+            for index, product in enumerate(products)
+        ][:25]
+        self.add_item(ProductSelect(cat_id, options, action))
+
+
+class ShopCategoryActionView(disnake.ui.View):
+    """Меню действий над выбранной категорией: настройки, добавить/редактировать/удалить товар."""
+
+    def __init__(self, cat_id: str):
+        super().__init__(timeout=180)
+        self.cat_id = cat_id
+
+    @disnake.ui.button(label="Настройки категории", style=disnake.ButtonStyle.primary, emoji="⚙️")
+    async def edit_category(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        catalog = load_catalog()
+        cat_data = catalog.get(self.cat_id)
+        if not cat_data:
+            await inter.response.send_message("❌ Категория не найдена.", ephemeral=True)
+            return
+        await inter.response.send_modal(CategorySettingsModal(self.cat_id, cat_data))
+
+    @disnake.ui.button(label="Добавить товар", style=disnake.ButtonStyle.success, emoji="➕")
+    async def add_product(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        await inter.response.send_modal(AddProductModal(self.cat_id))
+
+    @disnake.ui.button(label="Редактировать товар", style=disnake.ButtonStyle.secondary, emoji="✏️")
+    async def edit_product(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        catalog = load_catalog()
+        products = catalog.get(self.cat_id, {}).get("products", [])
+        if not products:
+            await inter.response.send_message("❌ В этой категории пока нет товаров.", ephemeral=True)
+            return
+        await inter.response.send_message(
+            "Выберите товар для редактирования:",
+            view=ProductSelectView(self.cat_id, products, action="edit"),
+            ephemeral=True
+        )
+
+    @disnake.ui.button(label="Удалить товар", style=disnake.ButtonStyle.danger, emoji="🗑️")
+    async def delete_product(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
+        catalog = load_catalog()
+        products = catalog.get(self.cat_id, {}).get("products", [])
+        if not products:
+            await inter.response.send_message("❌ В этой категории пока нет товаров.", ephemeral=True)
+            return
+        await inter.response.send_message(
+            "Выберите товар для удаления:",
+            view=ProductSelectView(self.cat_id, products, action="delete"),
+            ephemeral=True
+        )
+
+
+class ShopCategorySelect(disnake.ui.StringSelect):
+    def __init__(self, options: list):
+        super().__init__(
+            placeholder="Выберите категорию для управления",
+            options=options,
+            custom_id="shop_admin_select_category"
+        )
+
+    async def callback(self, inter: disnake.MessageInteraction):
+        cat_id = self.values[0]
+
+        if cat_id == "__none__":
+            await inter.response.send_message("❌ В каталоге пока нет категорий. Добавьте новую кнопкой ниже.", ephemeral=True)
+            return
+
+        catalog = load_catalog()
+        cat_data = catalog.get(cat_id)
+        if not cat_data:
+            await inter.response.send_message("❌ Категория не найдена.", ephemeral=True)
+            return
+
+        embed = disnake.Embed(
+            title=f"⚙️ Управление категорией: {cat_data.get('label', cat_id)}",
+            description=f"Товаров в категории: **{len(cat_data.get('products', []))}**",
+            color=0x2b2d31
+        )
+        await inter.response.send_message(embed=embed, view=ShopCategoryActionView(cat_id), ephemeral=True)
+
+
+class AddCategoryButton(disnake.ui.Button):
+    def __init__(self):
+        super().__init__(label="Новая категория", style=disnake.ButtonStyle.success, emoji="➕", custom_id="shop_admin_add_category")
+
+    async def callback(self, inter: disnake.MessageInteraction):
+        await inter.response.send_modal(AddCategoryModal())
+
+
+class ShopCategorySelectView(disnake.ui.View):
+    """Стартовое меню /shop: выбор категории для управления + создание новой категории."""
+
+    def __init__(self):
+        super().__init__(timeout=180)
+        catalog = load_catalog()
+
+        if catalog:
+            options = [
+                disnake.SelectOption(
+                    label=data.get("label", cid)[:100],
+                    value=cid,
+                    description=f"Товаров: {len(data.get('products', []))}"
+                )
+                for cid, data in catalog.items()
+            ]
+        else:
+            options = [disnake.SelectOption(label="Нет категорий", value="__none__")]
+
+        self.add_item(ShopCategorySelect(options))
+        self.add_item(AddCategoryButton())
 
 
 class StaffSelectView(disnake.ui.View):
@@ -599,225 +936,9 @@ class SupportView(disnake.ui.View):
         await inter.response.send_modal(SupportModal())
 
 
-# ------------------------------------------
-# 2.1 ВИТРИНА МАГАЗИНА (динамическая, на основе catalog.json)
-# ------------------------------------------
-
-class DynamicStoreView(disnake.ui.View):
-    """
-    Кнопки категорий магазина. Строится динамически из catalog.json,
-    поэтому добавление/удаление/переименование категорий через /shop
-    не требует правки кода. custom_id каждой кнопки — f"btn_store_{cat_id}",
-    что для исходных категорий (ds/boost/steam) полностью совпадает
-    со старыми custom_id и не ломает уже отправленные сообщения.
-    """
-
-    def __init__(self):
-        super().__init__(timeout=None)
-        self._build_buttons()
-
-    def _build_buttons(self):
-        self.clear_items()
-        catalog = load_catalog()
-        for cat_id, cat in catalog.get("categories", {}).items():
-            emoji = cat.get("emoji") or None
-            button = disnake.ui.Button(
-                label=cat.get("label", cat_id),
-                style=disnake.ButtonStyle.secondary,
-                emoji=emoji,
-                custom_id=f"btn_store_{cat_id}",
-            )
-            button.callback = self._make_callback(cat_id)
-            self.add_item(button)
-
-    @staticmethod
-    def _make_callback(cat_id: str):
-        async def callback(inter: disnake.MessageInteraction):
-            catalog = load_catalog()
-            cat = catalog.get("categories", {}).get(cat_id)
-            if not cat:
-                return await inter.response.send_message("❌ Эта категория больше не существует.", ephemeral=True)
-
-            embed = disnake.Embed(
-                title=f"{cat.get('label', cat_id)}",
-                description=cat.get("description", ""),
-                color=0x2b2d31
-            )
-            if cat.get("banner"):
-                embed.set_image(url=cat["banner"])
-
-            embed.add_field(name="🛍️ Товары", value=format_products_field(cat.get("products", [])), inline=False)
-
-            # Под сообщением категории — кнопка "Сделать заказ" (не тронута, как и раньше)
-            await inter.response.send_message(embed=embed, view=OrderActionView(), ephemeral=True)
-
-        return callback
-
-
-# ------------------------------------------
-# 2.2 УПРАВЛЕНИЕ МАГАЗИНОМ (/shop) — Views для админов
-# ------------------------------------------
-
-def build_category_manage_embed(cat_id: str, cat: dict) -> disnake.Embed:
-    embed = disnake.Embed(
-        title=f"🗂️ Управление категорией: {cat.get('label', cat_id)}",
-        color=0x2b2d31
-    )
-    embed.add_field(name="Эмодзи кнопки", value=cat.get("emoji") or "—", inline=True)
-    embed.add_field(name="ID категории", value=f"`{cat_id}`", inline=True)
-    embed.add_field(name="Баннер", value=cat.get("banner") or "—", inline=False)
-    embed.add_field(name="Описание", value=cat.get("description") or "—", inline=False)
-
-    products = cat.get("products", [])
-    if products:
-        lines = [f"`{i}.` **{p.get('name')}** — {p.get('price')}" for i, p in enumerate(products)]
-        embed.add_field(name=f"Товары ({len(products)})", value="\n".join(lines)[:1024], inline=False)
-    else:
-        embed.add_field(name="Товары", value="Список пуст.", inline=False)
-
-    return embed
-
-
-class ShopCategorySelectView(disnake.ui.View):
-    """Первый шаг /shop — выбор категории для управления."""
-
-    def __init__(self, catalog: dict):
-        super().__init__(timeout=180)
-        options = [
-            disnake.SelectOption(
-                label=cat.get("label", cat_id),
-                value=cat_id,
-                description=f"Товаров: {len(cat.get('products', []))}",
-                emoji=(cat.get("emoji") or None)
-            )
-            for cat_id, cat in catalog.get("categories", {}).items()
-        ]
-        if not options:
-            options = [disnake.SelectOption(label="Нет категорий", value="__none__")]
-
-        select = disnake.ui.StringSelect(
-            placeholder="Выберите категорию для управления",
-            custom_id="shop_select_category",
-            options=options[:25]
-        )
-        select.callback = self.select_callback
-        self.add_item(select)
-
-    async def select_callback(self, inter: disnake.MessageInteraction):
-        cat_id = inter.data["values"][0]
-        if cat_id == "__none__":
-            return await inter.response.send_message("❌ Категорий пока нет.", ephemeral=True)
-
-        catalog = load_catalog()
-        cat = catalog["categories"].get(cat_id)
-        if not cat:
-            return await inter.response.send_message("❌ Категория не найдена.", ephemeral=True)
-
-        await inter.response.edit_message(
-            content=None,
-            embed=build_category_manage_embed(cat_id, cat),
-            view=ShopCategoryManageView(cat_id)
-        )
-
-
-class ShopProductPickView(disnake.ui.View):
-    """Выбор конкретного товара категории для редактирования или удаления."""
-
-    def __init__(self, cat_id: str, action: str):
-        super().__init__(timeout=180)
-        self.cat_id = cat_id
-        self.action = action  # "edit" или "delete"
-
-        catalog = load_catalog()
-        products = catalog["categories"].get(cat_id, {}).get("products", [])
-
-        options = [
-            disnake.SelectOption(label=p.get("name", f"Товар {i}")[:100], value=str(i), description=p.get("price", "")[:100])
-            for i, p in enumerate(products)
-        ]
-        if not options:
-            options = [disnake.SelectOption(label="Нет товаров", value="__none__")]
-
-        select = disnake.ui.StringSelect(
-            placeholder="Выберите товар",
-            custom_id=f"shop_pick_product_{action}",
-            options=options[:25]
-        )
-        select.callback = self.select_callback
-        self.add_item(select)
-
-        back_button = disnake.ui.Button(label="⬅️ Назад", style=disnake.ButtonStyle.secondary, custom_id=f"shop_back_{cat_id}")
-        back_button.callback = self.back_callback
-        self.add_item(back_button)
-
-    async def back_callback(self, inter: disnake.MessageInteraction):
-        catalog = load_catalog()
-        cat = catalog["categories"].get(self.cat_id, {})
-        await inter.response.edit_message(embed=build_category_manage_embed(self.cat_id, cat), view=ShopCategoryManageView(self.cat_id))
-
-    async def select_callback(self, inter: disnake.MessageInteraction):
-        value = inter.data["values"][0]
-        if value == "__none__":
-            return await inter.response.send_message("❌ В категории нет товаров.", ephemeral=True)
-
-        index = int(value)
-
-        if self.action == "edit":
-            await inter.response.send_modal(ProductEditModal(self.cat_id, index))
-        elif self.action == "delete":
-            catalog = load_catalog()
-            cat = catalog["categories"].setdefault(self.cat_id, {"products": []})
-            products = cat.setdefault("products", [])
-            if index >= len(products):
-                return await inter.response.send_message("❌ Товар уже удалён.", ephemeral=True)
-
-            removed = products.pop(index)
-            save_catalog(catalog)
-
-            await inter.response.edit_message(
-                content=f"🗑️ Товар **{removed.get('name')}** удалён из категории **{cat.get('label', self.cat_id)}**.",
-                embed=build_category_manage_embed(self.cat_id, cat),
-                view=ShopCategoryManageView(self.cat_id)
-            )
-
-
-class ShopCategoryManageView(disnake.ui.View):
-    """Основная панель управления выбранной категорией (для админов)."""
-
-    def __init__(self, cat_id: str):
-        super().__init__(timeout=180)
-        self.cat_id = cat_id
-
-    @disnake.ui.button(label="✏️ Изменить категорию", style=disnake.ButtonStyle.primary, row=0)
-    async def edit_category(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        await inter.response.send_modal(CategoryEditModal(self.cat_id))
-
-    @disnake.ui.button(label="➕ Добавить товар", style=disnake.ButtonStyle.success, row=0)
-    async def add_product(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        await inter.response.send_modal(ProductAddModal(self.cat_id))
-
-    @disnake.ui.button(label="📝 Редактировать товар", style=disnake.ButtonStyle.secondary, row=1)
-    async def edit_product(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        await inter.response.edit_message(view=ShopProductPickView(self.cat_id, action="edit"))
-
-    @disnake.ui.button(label="🗑️ Удалить товар", style=disnake.ButtonStyle.danger, row=1)
-    async def delete_product(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        await inter.response.edit_message(view=ShopProductPickView(self.cat_id, action="delete"))
-
-    @disnake.ui.button(label="⬅️ Ко всем категориям", style=disnake.ButtonStyle.secondary, row=2)
-    async def back_to_categories(self, button: disnake.ui.Button, inter: disnake.MessageInteraction):
-        catalog = load_catalog()
-        await inter.response.edit_message(
-            content="🗂️ Выберите категорию для управления:",
-            embed=None,
-            view=ShopCategorySelectView(catalog)
-        )
-
-
 # ==========================================
-# 3. SLASH-КОМАНДЫ
+# 3. SLASH-КОМАНДА /SETUP (Только для Админов)
 # ==========================================
-
 @bot.slash_command(
     name="setup",
     description="Настройка и отправка системных меню (Доступно только администраторам)",
@@ -825,35 +946,39 @@ class ShopCategoryManageView(disnake.ui.View):
 )
 @commands.has_permissions(administrator=True)
 async def setup(
-        inter: disnake.ApplicationCommandInteraction,
-        menu_type: str = commands.Param(
-            name="меню",
-            description="Выберите какое меню нужно отправить в этот канал",
-            choices={
-                "Витрина / Магазин": "store",
-                "Набор в Стафф": "staff",
-                "Поддержка": "support"
-            }
-        )
+    inter: disnake.ApplicationCommandInteraction,
+    menu_type: str = commands.Param(
+        name="меню",
+        description="Выберите какое меню нужно отправить в этот канал",
+        choices={
+            "Витрина / Магазин": "store",
+            "Набор в Стафф": "staff",
+            "Поддержка": "support"
+        }
+    )
 ):
     if menu_type == "store":
         catalog = load_catalog()
 
-        # Список категорий формируется динамически из catalog.json
         lines = []
-        for cat in catalog.get("categories", {}).values():
-            emoji = cat.get("emoji", "")
-            label = cat.get("label", "Категория")
-            lines.append(f"• {emoji} **{label}**".strip())
-        categories_text = "\n".join(lines) if lines else "Категории пока не добавлены."
+        for cid, data in catalog.items():
+            emoji = data.get("emoji") or ""
+            label = data.get("label", cid)
+            desc = data.get("description") or ""
+            lines.append(f"• {emoji} **{label}** — {desc}".strip())
+
+        description = (
+            "Выберите интересующую вас категорию и воспользуйтесь интерактивной кнопкой ниже, "
+            "чтобы ознакомиться с ценами.\n\n" + "\n".join(lines)
+        )
 
         embed = disnake.Embed(
             title="👋 Приветствуем в магазине!",
-            description="Выберите интересующую вас категорию и воспользуйтесь интерактивной кнопкой ниже, "
-                        "чтобы ознакомиться с товарами и ценами.\n\n" + categories_text,
+            description=description,
             color=0x2b2d31
         )
         embed.set_image(url=BANNER_STORE_MAIN)
+
         await inter.channel.send(embed=embed, view=DynamicStoreView())
         await inter.response.send_message("✅ Меню магазина успешно отправлено!", ephemeral=True)
 
@@ -876,6 +1001,7 @@ async def setup(
         )
         embed.set_image(url=BANNER_STAFF)
         embed.set_footer(text="Recruitment System")
+
         await inter.channel.send(embed=embed, view=StaffSelectView())
         await inter.response.send_message("✅ Меню набора успешно отправлено!", ephemeral=True)
 
@@ -886,10 +1012,14 @@ async def setup(
             color=0x2b2d31
         )
         embed.set_image(url=BANNER_SUPPORT)
+
         await inter.channel.send(embed=embed, view=SupportView())
         await inter.response.send_message("✅ Меню поддержки успешно отправлено!", ephemeral=True)
 
 
+# ==========================================
+# 3.1 SLASH-КОМАНДА /SHOP (Управление товарами, только для Админов)
+# ==========================================
 @bot.slash_command(
     name="shop",
     description="Управление категориями и товарами магазина (Доступно только администраторам)",
@@ -898,129 +1028,94 @@ async def setup(
 @commands.has_permissions(administrator=True)
 async def shop(inter: disnake.ApplicationCommandInteraction):
     catalog = load_catalog()
-    await inter.response.send_message(
-        "🗂️ Выберите категорию для управления:",
-        view=ShopCategorySelectView(catalog),
-        ephemeral=True
-    )
-
-
-@shop.sub_command(name="категория", description="Создать новую категорию товаров")
-async def shop_add_category(
-        inter: disnake.ApplicationCommandInteraction,
-        id_категории: str = commands.Param(
-            name="id",
-            description="Короткий идентификатор латиницей без пробелов, например: hosting"
+    embed = disnake.Embed(
+        title="🛠️ Управление магазином",
+        description=(
+            f"Всего категорий: **{len(catalog)}**\n"
+            "Выберите категорию ниже, чтобы изменить её оформление или список товаров, "
+            "либо создайте новую категорию."
         ),
-        название: str = commands.Param(description="Название кнопки категории")
-):
-    catalog = load_catalog()
-    cat_id = id_категории.strip().lower().replace(" ", "_")
-
-    if not cat_id.isalnum() and "_" not in cat_id:
-        return await inter.response.send_message("❌ ID категории должен состоять из латинских букв, цифр и `_`.", ephemeral=True)
-
-    if cat_id in catalog["categories"]:
-        return await inter.response.send_message("❌ Категория с таким ID уже существует.", ephemeral=True)
-
-    catalog["categories"][cat_id] = {
-        "label": название.strip(),
-        "emoji": "",
-        "banner": "",
-        "description": "",
-        "products": []
-    }
-    save_catalog(catalog)
-
-    await inter.response.send_message(
-        f"✅ Категория **{название}** (`{cat_id}`) создана.\n"
-        f"Используйте `/shop`, чтобы настроить эмодзи, баннер, описание и добавить товары.\n"
-        f"⚠️ Не забудьте повторно отправить `/setup` → «Магазин», чтобы новая кнопка появилась на витрине.",
-        ephemeral=True
+        color=0x2b2d31
     )
+    await inter.response.send_message(embed=embed, view=ShopCategorySelectView(), ephemeral=True)
 
 
 # ==========================================
-# 4. СЧЁТЧИК УЧАСТНИКОВ (голосовой канал)
+# 4. ГОЛОСОВОЙ КАНАЛ-СЧЁТЧИК УЧАСТНИКОВ
 # ==========================================
-# Discord ограничивает частоту переименования каналов (по факту — около
-# 2 изменений имени за 10 минут на канал). Чтобы не словить рейт-лимит,
-# бот не переименовывает канал сразу при каждом входе/выходе участника,
-# а лишь выставляет флаг "нужно обновить" и раз в COUNTER_UPDATE_INTERVAL
-# секунд проверяет его через фоновую задачу (tasks.loop).
-
-COUNTER_UPDATE_INTERVAL = 600  # 10 минут — безопасный интервал обновления имени канала
-_member_count_dirty = False
+# Discord ограничивает количество переименований одного канала примерно
+# двумя изменениями за 10 минут. Чтобы не словить rate-limit при частом
+# входе/выходе участников, обновление названия канала происходит не сразу,
+# а по фоновому таймеру (раз в 10 минут), и только если состав менялся.
+_counter_dirty = False
 
 
-@tasks.loop(seconds=COUNTER_UPDATE_INTERVAL)
-async def counter_channel_updater():
-    global _member_count_dirty
+def _mark_counter_dirty():
+    global _counter_dirty
+    _counter_dirty = True
+
+
+async def _apply_counter_update():
+    """Ставит актуальное количество участников в название канала-счётчика."""
+    global _counter_dirty
 
     if not COUNTER_CHANNEL_ID:
-        return
-    if not _member_count_dirty:
         return
 
     for guild in bot.guilds:
         channel = guild.get_channel(COUNTER_CHANNEL_ID)
         if channel is None:
             continue
+
         new_name = f"👥 Участников: {guild.member_count}"
         if channel.name == new_name:
             continue
+
         try:
             await channel.edit(name=new_name)
-        except disnake.HTTPException as e:
-            # Например, попали в rate-limit или не хватает прав — не роняем бота
-            print(f"⚠️ Не удалось обновить канал-счётчик участников: {e}")
+        except disnake.HTTPException as error:
+            # Например, попали в rate-limit или не хватает прав — не роняем бота.
+            print(f"⚠️ Не удалось обновить канал-счётчик участников: {error}")
 
-    _member_count_dirty = False
+    _counter_dirty = False
+
+
+@tasks.loop(minutes=10)
+async def update_counter_loop():
+    if _counter_dirty:
+        await _apply_counter_update()
+
+
+@update_counter_loop.before_loop
+async def before_update_counter_loop():
+    await bot.wait_until_ready()
 
 
 @bot.event
 async def on_member_join(member: disnake.Member):
-    global _member_count_dirty
-    _member_count_dirty = True
+    _mark_counter_dirty()
 
 
 @bot.event
 async def on_member_remove(member: disnake.Member):
-    global _member_count_dirty
-    _member_count_dirty = True
+    _mark_counter_dirty()
 
 
 # ==========================================
 # 5. ЗАПУСК БОТА (BotHost.ru / Переменная TOKEN)
 # ==========================================
-
 @bot.event
 async def on_ready():
-    # Убеждаемся, что catalog.json существует
-    load_catalog()
-
-    # Регистрируем персистентные View, чтобы кнопки работали после перезапуска бота
     bot.add_view(DynamicStoreView())
     bot.add_view(OrderActionView())
     bot.add_view(StaffSelectView())
     bot.add_view(SupportView())
     bot.add_view(CloseTicketView())
 
-    # Запускаем фоновую задачу обновления канала-счётчика участников
-    if not counter_channel_updater.is_running():
-        counter_channel_updater.start()
-
-    # Сразу актуализируем название канала-счётчика при старте бота (один запрос — лимит не страдает)
-    if COUNTER_CHANNEL_ID:
-        for guild in bot.guilds:
-            channel = guild.get_channel(COUNTER_CHANNEL_ID)
-            if channel:
-                new_name = f"👥 Участников: {guild.member_count}"
-                if channel.name != new_name:
-                    try:
-                        await channel.edit(name=new_name)
-                    except disnake.HTTPException as e:
-                        print(f"⚠️ Не удалось обновить канал-счётчик участников при старте: {e}")
+    # Обновляем счётчик участников сразу при запуске, затем — по фоновому таймеру.
+    _mark_counter_dirty()
+    if not update_counter_loop.is_running():
+        update_counter_loop.start()
 
     print(f"Бот {bot.user} успешно запущен!")
 
